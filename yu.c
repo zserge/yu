@@ -1,22 +1,41 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <getopt.h>
 #include <errno.h>
 
+/* 
+ * Try writing if file is a valid one, if write fails - close file and mark is
+ * as invalid.
+ */
+static int xwrite(int *fd, void *buf, size_t bufsz) {
+	int n;
+	if (*fd > -1) {
+		n = write(*fd, buf, bufsz);
+		if (n != bufsz) {
+			fprintf(stderr, "short write: %d, errno=%d\n", n, errno);
+			close(*fd);
+			*fd = -1;
+		}
+	}
+}
+
 int main(int argc, char *argv[]) {
-	int input = 0;
-	int output = -1;
+	int infd = STDIN_FILENO;   /* input */
+	int stdfd = STDOUT_FILENO; /* output */
+	int outfd = -1;            /* rotating output */
+
 	void *rotbuf = NULL;
 	size_t logsz = 0;
 	int c;
 
 	int rotate = 2;
 	size_t maxlogsz = 1024;
-	char *logname = "logcat.txt";
+	char *logname = NULL;
 
 	while ((c = getopt(argc, argv, "r:n:")) != -1) {
 		switch (c) {
@@ -44,16 +63,18 @@ int main(int argc, char *argv[]) {
 		return -1;
 	}
 
-	output = open(logname, O_CREAT | O_RDWR | O_APPEND, 0644);
-	if (output == -1) {
-		fprintf(stderr, "failed to create output file: %d\n", errno);
-		return -1;
+	/* Try opening file for append, but ignore all errors */
+	outfd = open(logname, O_CREAT | O_RDWR | O_APPEND, 0644);
+	if (outfd == -1) {
+		fprintf(stderr, "open() failed: file=%s, errno=%d\n", logname, errno);
 	}
 
-	off_t offset = lseek(output, 0, SEEK_END);
+	/* Go to the end of the file, on error - close the output */
+	off_t offset = lseek(outfd, 0, SEEK_END);
 	if (offset == -1) {
-		fprintf(stderr, "lseek() failed: %d\n", errno);
-		return -1;
+		fprintf(stderr, "lseek() failed: errno=%d\n", errno);
+		close(outfd);
+		outfd = -1;
 	}
 	logsz = (size_t) offset;
 
@@ -61,25 +82,28 @@ int main(int argc, char *argv[]) {
 		char buf[BUFSIZ];
 		size_t sz;
 
-		sz = read(input, buf, sizeof(buf));
-		if (sz < 0) {
-			fpritnf(stderr, "read failed: %d, errno=%d\n", sz, errno);
-		} else if (sz == 0) {
+		/* Read from input, on error - terminate loop */
+		sz = read(infd, buf, sizeof(buf));
+		if (sz <= 0) {
+			if (sz < 0) {
+				fpritnf(stderr, "read failed: %d, errno=%d\n", sz, errno);
+			}
 			break;
 		}
-		while (logsz + sz >= maxlogsz) {
+
+		/* If appending the buffer overflow the file - perform rotation */
+		while (logsz + sz > maxlogsz) {
 			int i;
 			size_t tailsz;
 			char oldname[BUFSIZ];
-			char newname[BUFSIZ]; // TODO: PATH_MAX?
+			char newname[BUFSIZ];
 
-			/* rotate */
+			/* rotate, print to stdout and close the current file */
 			tailsz = logsz + sz - maxlogsz;
-			/*fprintf(stderr, "rotate %d %d %d %d\n", sz, logsz, sz - tailsz, maxlogsz);*/
-			write(output, buf, sz - tailsz);
+			xwrite(&outfd, buf, sz - tailsz);
 			memmove(buf, buf + sz - tailsz, tailsz);
 			sz = tailsz;
-			close(output);
+			close(outfd);
 
 			for (i = rotate - 1; i >= 0; i--) {
 				snprintf(newname, sizeof(newname)-1, "%s.%u", logname, i+1);
@@ -93,21 +117,20 @@ int main(int argc, char *argv[]) {
 				rename(oldname, newname);
 			}
 
-			output = open(logname, O_CREAT | O_RDWR | O_TRUNC, 0644);
-			if (output == -1) {
-				fprintf(stderr, "failed to create output file: %d\n", errno);
-				return -1;
+			outfd = open(logname, O_CREAT | O_RDWR | O_TRUNC, 0644);
+			if (outfd == -1) {
+				fprintf(stderr, "open() failed: file=%s, errno=%d\n", logname, errno);
 			}
 			logsz = 0;
 		}
 
-		write(1, buf, sz);
-		write(output, buf, sz);
-		fsync(output);
+		xwrite(&stdfd, buf, sz);
+		xwrite(&outfd, buf, sz);
+		fsync(outfd);
 	}
 
-	close(input);
-	close(output);
+	close(infd);
+	close(outfd);
 
 	return 0;
 }
