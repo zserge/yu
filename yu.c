@@ -18,7 +18,7 @@ int main(int argc, char *argv[]) {
 	size_t maxlogsz = 1024;
 	char *logname = "logcat.txt";
 
-	while ((c = getopt(argc, argv, "ar:n:c:d:")) != -1) {
+	while ((c = getopt(argc, argv, "r:n:")) != -1) {
 		switch (c) {
 			case 'n':
 				/* TODO: parse nM, nK as megabytes and kilobytes */
